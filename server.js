@@ -19,10 +19,12 @@ const io = socketIo(server);
 // Twilio Account Details
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken = process.env.TWILIO_AUTH_TOKEN;
+const client = twilio(accountSid, authToken);
 
 // Spotify App Details
 const spotifyClientID = process.env.SPOTIFY_CLIENT_ID;
 const spotifyClientSecret = process.env.SPOTIFY_CLIENT_SECRET;
+const redirectURI = process.env.SPOTIFY_REDIRECT_URI; // Make sure to define this in your .env
 
 // MySQL Database Connection
 const db = mysql.createConnection({
@@ -49,15 +51,19 @@ function emitLikedSongsUpdate() {
     io.emit('likedSongsUpdated');
 }
 
+// Emit an event whenever a new song request is added
+function emitNewRequest() {
+    io.emit('newSongRequest');
+}
+
 // Set up Socket.io to handle connections (optional, for further interaction)
 io.on('connection', (socket) => {
     console.log('A DJ connected to the dashboard');
-    
+
     socket.on('disconnect', () => {
         console.log('A DJ disconnected');
     });
 });
-
 
 // Start the server (change `app.listen` to `server.listen`)
 const port = 3000;
@@ -68,17 +74,99 @@ server.listen(port, () => {
 // Route to handle Twilio incoming messages
 app.post('/whatsapp', (req, res) => {
     const from = req.body.From; // e.g., 'whatsapp:+919885044737'
+    const messageBody = req.body.Body; // User's request message
 
-    // Properly encode the full WhatsApp number
-    const encodedNumber = encodeURIComponent(from);
+    // Normalize the WhatsApp number by removing the 'whatsapp:' prefix
+    const normalizedNumber = from.replace('whatsapp:', '');
 
-    let responseMessage = `Thanks for checking in at our club! Feel free to share your Spotify profile to help us create the perfect vibe for tonight. Click here to connect your Spotify: https://bot.extraamedia.com/login?state=${encodedNumber}`;
+    // Check if the user already exists in the database
+    const findUserSql = 'SELECT id, spotify_access_token FROM spotify_users WHERE whatsapp_number = ?';
+    db.query(findUserSql, [normalizedNumber], (err, results) => {
+        if (err) {
+            console.error('Error querying database:', err);
+            res.status(500).send('Database error.');
+            return;
+        }
 
-    const twiml = new twilio.twiml.MessagingResponse();
-    twiml.message(responseMessage);
+        if (results.length === 0) {
+            // User does not exist, send Spotify connection link
+            let responseMessage = `Thanks for checking in at our club! Feel free to share your Spotify profile to help us create the perfect vibe for tonight. Click here to connect your Spotify: https://bot.extraamedia.com/login?state=${encodeURIComponent(from)}`;
 
-    res.writeHead(200, { 'Content-Type': 'text/xml' });
-    res.end(twiml.toString());
+            const twiml = new twilio.twiml.MessagingResponse();
+            twiml.message(responseMessage);
+            res.writeHead(200, { 'Content-Type': 'text/xml' });
+            res.end(twiml.toString());
+        } else {
+            // User exists, process song requests
+            const spotifyAccessToken = results[0].spotify_access_token;
+
+            if (messageBody.toLowerCase().startsWith('request ')) {
+                // Extract the song name and artist name
+                const songRequest = messageBody.substring(8).trim();
+
+                if (songRequest) {
+                    // Insert the song request into the database
+                    const insertRequestSql = `
+                        INSERT INTO song_requests (whatsapp_number, request_message)
+                        VALUES (?, ?)
+                    `;
+                    db.query(insertRequestSql, [normalizedNumber, songRequest], (err, result) => {
+                        if (err) {
+                            console.error('Error inserting song request:', err);
+                            res.status(500).send('Database error.');
+                            return;
+                        }
+
+                        console.log(`New song request added from ${normalizedNumber}: ${songRequest}`);
+                        emitNewRequest(); // Notify DJ dashboard of the new request
+
+                        // Respond to the user with a confirmation
+                        const twiml = new twilio.twiml.MessagingResponse();
+                        twiml.message('Thank you for your song request! The DJ will consider it.');
+                        res.writeHead(200, { 'Content-Type': 'text/xml' });
+                        res.end(twiml.toString());
+                    });
+                } else {
+                    // Respond with an error message if the format is incorrect
+                    const twiml = new twilio.twiml.MessagingResponse();
+                    twiml.message('Please provide the song name and artist in the format: Request [song name] by [artist name].');
+                    res.writeHead(200, { 'Content-Type': 'text/xml' });
+                    res.end(twiml.toString());
+                }
+            } else if (messageBody.includes('http')) {
+                // Handle song requests with a shared link
+                const songLink = messageBody;
+
+                // Insert the song request with the link into the database
+                const insertRequestSql = `
+                    INSERT INTO song_requests (whatsapp_number, request_message)
+                    VALUES (?, ?)
+                `;
+                db.query(insertRequestSql, [normalizedNumber, songLink], (err, result) => {
+                    if (err) {
+                        console.error('Error inserting song request:', err);
+                        res.status(500).send('Database error.');
+                        return;
+                    }
+
+                    console.log(`New song request added from ${normalizedNumber}: ${songLink}`);
+                    emitNewRequest(); // Notify DJ dashboard of the new request
+
+                    // Respond to the user with a confirmation
+                    const twiml = new twilio.twiml.MessagingResponse();
+                    twiml.message('Thank you for sharing the link! The DJ will consider it.');
+                    res.writeHead(200, { 'Content-Type': 'text/xml' });
+                    res.end(twiml.toString());
+                });
+            } else {
+                // Respond with a message if the format is not recognized
+                const twiml = new twilio.twiml.MessagingResponse();
+                twiml.message('To request a song, please start your message with "Request" followed by the song name and artist or share a song link.');
+                res.writeHead(200, { 'Content-Type': 'text/xml' });
+                res.end(twiml.toString());
+            }
+        }
+    });
 });
 
 // Route to initiate Spotify login
@@ -96,6 +184,25 @@ app.get('/login', (req, res) => {
 
     res.redirect(authURL);
 });
+
+// Function to send instructions on how to use the bot
+function sendInstructions(whatsappNumber) {
+    const message = `Welcome! You can now request songs directly from this bot.
+
+To request a song:
+1. Send "Request [song name] by [artist name]".
+   Example: Request Blinding Lights by The Weeknd
+
+2. Alternatively, share a link to a song from any platform (YouTube, Apple Music, Spotify, etc.) and we'll try to add it to the request list.`;
+
+    client.messages.create({
+        from: 'whatsapp:+14155238886', // Replace with your Twilio WhatsApp number
+        to: `whatsapp:${whatsappNumber}`,
+        body: message
+    }).then(message => console.log(`Instructions sent to ${whatsappNumber}`))
+    .catch(err => console.error('Error sending instructions:', err));
+}
+
 
 // Spotify callback handler
 app.get('/callback', async (req, res) => {
@@ -142,9 +249,8 @@ app.get('/callback', async (req, res) => {
                         return;
                     }
 
-                    // Fetch user data after updating access token
-                    fetchLikedSongs(accessToken, userId);
-                    fetchUserPlaylists(accessToken, userId);
+                    // Send instructions on how to use the bot
+                    sendInstructions(normalizedNumber);
 
                     res.send('Spotify account updated successfully! Your favorite songs and playlists are being refreshed.');
                 });
@@ -158,10 +264,8 @@ app.get('/callback', async (req, res) => {
                         return;
                     }
 
-                    // Fetch user data after storing access token
-                    const userId = result.insertId; // Get the inserted user's ID
-                    fetchLikedSongs(accessToken, userId);
-                    fetchUserPlaylists(accessToken, userId);
+                    // Send instructions on how to use the bot
+                    sendInstructions(normalizedNumber);
 
                     res.send('Spotify account connected successfully! Your favorite songs and playlists are being saved.');
                 });
@@ -323,6 +427,126 @@ app.get('/dj/most-liked-songs', (req, res) => {
             return;
         }
 
+        res.json(results);
+    });
+});
+
+let got;
+
+(async () => {
+    got = (await import('got')).default;
+})();
+const metascraper = require('metascraper')([
+    require('metascraper-title')(),
+    require('metascraper-author')(),
+    require('metascraper-url')(),
+]);
+app.post('/whatsapp/request', async (req, res) => {
+    const from = req.body.From; // WhatsApp number (e.g., 'whatsapp:+919885044737')
+    const messageBody = req.body.Body; // User's request message
+
+    // Normalize the WhatsApp number by removing the 'whatsapp:' prefix
+    const normalizedNumber = from.replace('whatsapp:', '');
+
+    // Check if the message contains a URL
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    const urls = messageBody.match(urlRegex);
+
+    if (urls && urls.length > 0) {
+        // Take the first URL found in the message
+        const url = urls[0];
+
+        try {
+            // Fetch metadata using metascraper
+            const { body: html, url: responseUrl } = await got(url);
+            const metadata = await metascraper({ html, url: responseUrl });
+
+            // Extract relevant metadata or fall back to defaults
+            const songTitle = metadata.title || 'Unknown Song';
+            const artistName = metadata.author || 'Unknown Artist';
+
+            // Insert the song request into the database
+            const insertRequestSql = `
+                INSERT INTO song_requests (whatsapp_number, request_message, song_name, artist_name, spotify_url)
+                VALUES (?, ?, ?, ?, ?)
+            `;
+            db.query(insertRequestSql, [normalizedNumber, messageBody, songTitle, artistName, url], (err, result) => {
+                if (err) {
+                    console.error('Error inserting song request:', err);
+                    res.status(500).send('Database error.');
+                    return;
+                }
+
+                console.log(`New song request added from ${normalizedNumber}: ${songTitle} by ${artistName}`);
+                emitNewRequest(); // Notify DJ dashboard of the new request
+
+                // Respond to the user with a confirmation
+                const twiml = new twilio.twiml.MessagingResponse();
+                twiml.message(`Thank you for your song request: "${songTitle}" by ${artistName}. The DJ will consider it.`);
+                res.writeHead(200, { 'Content-Type': 'text/xml' });
+                res.end(twiml.toString());
+            });
+        } catch (error) {
+            console.error('Error fetching metadata from URL:', error);
+            const twiml = new twilio.twiml.MessagingResponse();
+            twiml.message('Unable to fetch song details from the provided link. Please try again or provide a different link.');
+            res.writeHead(200, { 'Content-Type': 'text/xml' });
+            res.end(twiml.toString());
+        }
+    } else if (messageBody.toLowerCase().startsWith('request ')) {
+        // Extract the song name and artist name
+        const songRequest = messageBody.substring(8).trim();
+
+        if (songRequest) {
+            // Insert the song request into the database
+            const insertRequestSql = `
+                INSERT INTO song_requests (whatsapp_number, request_message)
+                VALUES (?, ?)
+            `;
+            db.query(insertRequestSql, [normalizedNumber, songRequest], (err, result) => {
+                if (err) {
+                    console.error('Error inserting song request:', err);
+                    res.status(500).send('Database error.');
+                    return;
+                }
+
+                console.log(`New song request added from ${normalizedNumber}: ${songRequest}`);
+                emitNewRequest(); // Notify DJ dashboard of the new request
+
+                // Respond to the user with a confirmation
+                const twiml = new twilio.twiml.MessagingResponse();
+                twiml.message('Thank you for your song request! The DJ will consider it.');
+                res.writeHead(200, { 'Content-Type': 'text/xml' });
+                res.end(twiml.toString());
+            });
+        } else {
+            // Respond with an error message if the format is incorrect
+            const twiml = new twilio.twiml.MessagingResponse();
+            twiml.message('Please provide the song name and artist in the format: Request [song name] by [artist name].');
+            res.writeHead(200, { 'Content-Type': 'text/xml' });
+            res.end(twiml.toString());
+        }
+    } else {
+        // Respond with a message if the format is not recognized
+        const twiml = new twilio.twiml.MessagingResponse();
+        twiml.message('To request a song, please start your message with "Request" followed by the song name and artist or share a song link.');
+        res.writeHead(200, { 'Content-Type': 'text/xml' });
+        res.end(twiml.toString());
+    }
+});
+
+// Emit an event whenever a new song request is added
+function emitNewRequest() {
+    io.emit('newSongRequest');
+}
+app.get('/dj/song-requests', (req, res) => {
+    const sql = `SELECT whatsapp_number, request_message, created_at FROM song_requests ORDER BY created_at DESC`;
+    db.query(sql, (err, results) => {
+        if (err) {
+            console.error('Error fetching song requests:', err);
+            res.status(500).send('Database error.');
+            return;
+        }
         res.json(results);
     });
 });
