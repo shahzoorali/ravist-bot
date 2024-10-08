@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DJ Dashboard - Most Liked Songs</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f0f0f0;
+            color: #333;
+        }
+        .container {
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        }
+        h2 {
+            text-align: center;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        th, td {
+            padding: 10px;
+            border: 1px solid #ddd;
+            text-align: left;
+        }
+        th {
+            background-color: #f8f8f8;
+        }
+        #load-more {
+            margin: 20px auto;
+            display: block;
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>Most Liked Songs</h2>
+        <table>
+<thead>
+    <tr>
+        <th onclick="sortTable('serial')">#</th> <!-- Serial Number Column -->
+        <th onclick="sortTable('song_name')">Song Name</th>
+        <th onclick="sortTable('artist_name')">Artist</th>
+        <th onclick="sortTable('genre')">Genre</th>
+        <th onclick="sortTable('bpm')">BPM</th>
+        <th onclick="sortTable('like_count')">Likes</th>
+    </tr>
+</thead>
+            <tbody id="song-list">
+                <!-- Songs will be populated here -->
+            </tbody>
+        </table>
+        <button id="load-more">Load More</button>
+    </div>
+    
+    <!-- Include Socket.io script -->
+    <script src="/socket.io/socket.io.js"></script>
+<script>
+    const socket = io(); // Initialize the Socket.io connection
+    let currentPage = 1; // Keep track of the current page
+    let serialNumber = 1; // Global counter to keep track of serial numbers
+    let songsData = []; // To store all fetched songs for sorting
+
+    // Function to fetch the most liked songs
+    async function fetchMostLikedSongs(page = 1) {
+        try {
+            const response = await fetch(`/dj/most-liked-songs?page=${page}`);
+            const songs = await response.json();
+
+            songsData = songsData.concat(songs); // Add newly fetched songs to songsData
+            renderTable(songsData); // Render the table with current data
+        } catch (error) {
+            console.error('Error fetching most liked songs:', error);
+        }
+    }
+
+    // Function to render the table
+    function renderTable(data) {
+        const songList = document.getElementById('song-list');
+        songList.innerHTML = ''; // Clear the existing list
+        serialNumber = 1; // Reset serial number for rendering
+
+        data.forEach(song => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${serialNumber}</td> <!-- Serial Number -->
+                <td>${song.song_name}</td>
+                <td>${song.artist_name}</td>
+                <td>${song.genre || 'Unknown'}</td>
+                <td>${song.bpm ? song.bpm.toFixed(2) : 'N/A'}</td>
+                <td>${song.like_count}</td>
+            `;
+            songList.appendChild(row);
+            serialNumber++; // Increment the serial number
+        });
+    }
+
+    // Sorting function
+    function sortTable(column) {
+        let sortOrder = 1;
+
+        // Toggle sort order (ascending/descending)
+        if (songsData.sortColumn === column) {
+            sortOrder = -songsData.sortOrder;
+        }
+
+        songsData.sort((a, b) => {
+            if (a[column] < b[column]) return -1 * sortOrder;
+            if (a[column] > b[column]) return 1 * sortOrder;
+            return 0;
+        });
+
+        songsData.sortColumn = column;
+        songsData.sortOrder = sortOrder;
+
+        renderTable(songsData); // Re-render the sorted table
+    }
+
+    // Fetch the first page of most liked songs when the page loads
+    window.onload = () => {
+        fetchMostLikedSongs(currentPage);
+    };
+
+    // Listen for the 'likedSongsUpdated' event to refresh the song list
+    socket.on('likedSongsUpdated', () => {
+        currentPage = 1;
+        serialNumber = 1; // Reset serial number
+        songsData = []; // Clear the existing data
+        fetchMostLikedSongs(currentPage); // Reload the first page
+    });
+
+    // Load more songs when "Load More" button is clicked
+    document.getElementById('load-more').addEventListener('click', () => {
+        currentPage++;
+        fetchMostLikedSongs(currentPage);
+    });
+</script>
+
+</body>
+</html>
